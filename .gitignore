@@ -1,0 +1,26 @@
+# Segredos e configurações locais
+.env
+.env.*
+!.env.example
+
+# Dependências e logs
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.log
+
+# Dados e saídas locais do MongoDB
+.data/
+data/
+dumps/
+*.bson
+*.metadata.json
+
+# Sistema operacional e editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

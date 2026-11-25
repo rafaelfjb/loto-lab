@@ -1,0 +1,17 @@
+{
+  "name": "lotolab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Aplicação web para consulta e análise histórica da Lotofácil.",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check scripts/import-draws.mjs && node --check public/xlsx-reader.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.8.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
