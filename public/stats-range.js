@@ -3,6 +3,7 @@
 
   const STORAGE_KEY = 'lotolab.stats-range.v1';
   let rangeState = null;
+  let sumFilterState = null;
 
   function availableDraws() {
     const select = document.querySelector('#games #drawSelect');
@@ -62,6 +63,24 @@
         </select>
       </label>
       <p id="statsRangePresetNote" class="game-set-note">Equilibrado aplica filtros de soma, pares, borda/centro e faixas verticais conforme o perfil histórico. Soma típica filtra apenas pela faixa histórica de soma. Jogos com mais de 15 dezenas têm as faixas ajustadas proporcionalmente.</p>
+      <div class="game-set-controls" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:10px">
+        <label class="filter-label" style="grid-column:1/-1">Filtro de soma adicional
+          <select id="statsSumFilterMode" class="field" aria-label="Modo do filtro de soma">
+            <option value="off">Desativado</option>
+            <option value="typical">Faixa típica do período · percentis 5–95%</option>
+            <option value="manual">Faixa manual</option>
+          </select>
+        </label>
+        <div id="statsSumManualFields" style="display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+          <label class="filter-label">Soma mínima
+            <input id="statsSumMin" class="field" type="number" step="1" inputmode="numeric" aria-label="Soma mínima permitida">
+          </label>
+          <label class="filter-label">Soma máxima
+            <input id="statsSumMax" class="field" type="number" step="1" inputmode="numeric" aria-label="Soma máxima permitida">
+          </label>
+        </div>
+      </div>
+      <p id="statsSumFilterSummary" class="game-set-note" aria-live="polite">O filtro adicional pode ser combinado com qualquer estratégia.</p>
       <p id="statsRangeSummary" class="game-set-note" aria-live="polite"></p>`;
     randomCard.insertAdjacentElement('beforebegin', card);
     return card;
@@ -90,6 +109,7 @@
       if (summary.textContent !== 'Carregue resultados para escolher um intervalo.') {
         summary.textContent = 'Carregue resultados para escolher um intervalo.';
       }
+      refreshSumFilter();
       return;
     }
 
@@ -115,9 +135,126 @@
     const text = `Intervalo selecionado: #${rangeState.start}–#${rangeState.end} · ${count} concursos carregados.`;
     if (countLabel.textContent !== label) countLabel.textContent = label;
     if (summary.textContent !== text) summary.textContent = text;
+    refreshSumFilter();
   }
 
   const PRESET_STORAGE_KEY = 'lotolab.stats-preset.v1';
+
+  const SUM_FILTER_STORAGE_KEY = 'lotolab.stats-sum-filter.v1';
+
+  function savedSumFilter() {
+    try {
+      const value = JSON.parse(localStorage.getItem(SUM_FILTER_STORAGE_KEY) || 'null');
+      const mode = ['typical', 'manual'].includes(value?.mode) ? value.mode : 'off';
+      return {
+        mode,
+        min: Number.isInteger(value?.min) ? value.min : null,
+        max: Number.isInteger(value?.max) ? value.max : null
+      };
+    } catch { return { mode: 'off', min: null, max: null }; }
+  }
+
+  function sumFilterSettings() {
+    if (!sumFilterState) sumFilterState = savedSumFilter();
+    return sumFilterState;
+  }
+
+  function sumBoundsForSize(size) {
+    return {
+      min: size * (size + 1) / 2,
+      max: size * (2 * rules.universe - size + 1) / 2
+    };
+  }
+
+  function refreshSumFilter() {
+    const modeInput = document.querySelector('#statsSumFilterMode');
+    const minInput = document.querySelector('#statsSumMin');
+    const maxInput = document.querySelector('#statsSumMax');
+    const fields = document.querySelector('#statsSumManualFields');
+    const summary = document.querySelector('#statsSumFilterSummary');
+    if (!modeInput || !summary) return;
+    const settings = sumFilterSettings();
+    const size = Number(document.querySelector('#gameSetSize')?.value) || rules.drawCount;
+    const possible = sumBoundsForSize(size);
+    modeInput.value = settings.mode;
+    if (fields) fields.style.display = settings.mode === 'manual' ? 'grid' : 'none';
+    if (minInput && maxInput) {
+      minInput.min = maxInput.min = String(possible.min);
+      minInput.max = maxInput.max = String(possible.max);
+      const min = Math.min(possible.max, Math.max(possible.min, settings.min ?? possible.min));
+      const max = Math.min(possible.max, Math.max(possible.min, settings.max ?? possible.max));
+      minInput.value = String(min);
+      maxInput.value = String(Math.max(min, max));
+    }
+    let text;
+    if (settings.mode === 'manual') {
+      const minimum = minInput?.value || possible.min;
+      const maximum = maxInput?.value || possible.max;
+      text = `Faixa manual: soma ${minimum}–${maximum}. Para ${size} dezenas, os limites possíveis são ${possible.min}–${possible.max}.`;
+    } else if (settings.mode === 'typical') {
+      const draws = selectedIntervalDraws();
+      if (!draws.length) text = 'Selecione um intervalo com concursos carregados para calcular a faixa típica de soma.';
+      else {
+        const scale = size / rules.drawCount;
+        const sums = draws.map(draw => draw.dezenas.reduce((total, n) => total + Number(n), 0));
+        const bounds = profileBounds(sums, scale, possible.min, possible.max);
+        text = `Faixa típica aplicada: soma ${bounds.min}–${bounds.max} (percentis 5–95% dos concursos #${draws[0].numero}–#${draws.at(-1).numero}).`;
+      }
+    } else {
+      text = 'Filtro adicional desativado. Presets estatísticos ainda aplicam seus próprios critérios.';
+    }
+    if (summary.textContent !== text) summary.textContent = text;
+  }
+
+  function resolveSumFilter(draws, size) {
+    const mode = sumFilterSettings().mode;
+    if (mode === 'off') return { valid: true, mode, bounds: null };
+    const possible = sumBoundsForSize(size);
+    if (mode === 'manual') {
+      const minInput = document.querySelector('#statsSumMin');
+      const maxInput = document.querySelector('#statsSumMax');
+      const minText = minInput ? minInput.value : sumFilterSettings().min;
+      const maxText = maxInput ? maxInput.value : sumFilterSettings().max;
+      const min = minText === '' || minText == null ? NaN : Number(minText);
+      const max = maxText === '' || maxText == null ? NaN : Number(maxText);
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < possible.min || max > possible.max || min > max) {
+        return { valid: false, error: `Informe uma faixa de soma inteira entre ${possible.min} e ${possible.max}, com mínimo menor ou igual ao máximo.` };
+      }
+      return { valid: true, mode, bounds: { min, max } };
+    }
+    if (!draws.length) return { valid: false, error: 'Não há concursos válidos carregados no intervalo para calcular a faixa típica de soma.' };
+    const scale = size / rules.drawCount;
+    const sums = draws.map(draw => draw.dezenas.reduce((total, n) => total + Number(n), 0));
+    return { valid: true, mode, bounds: profileBounds(sums, scale, possible.min, possible.max) };
+  }
+
+  function sumFilterMatches(total, filter) {
+    return !filter?.bounds || (total >= filter.bounds.min && total <= filter.bounds.max);
+  }
+
+  function sumFilterAnnotation(filter) {
+    if (!filter || filter.mode === 'off' || !filter.bounds) return '';
+    const label = filter.mode === 'manual' ? 'manual' : 'típica do período (percentis 5–95%)';
+    return `Filtro adicional de soma ${label}: ${filter.bounds.min}–${filter.bounds.max}.`;
+  }
+
+  function appendSumFilterAnnotation(observation, filter) {
+    const annotation = sumFilterAnnotation(filter);
+    return annotation ? `${observation} ${annotation}` : observation;
+  }
+
+  function saveSumFilterFromInputs() {
+    const mode = document.querySelector('#statsSumFilterMode')?.value;
+    const minText = document.querySelector('#statsSumMin')?.value;
+    const maxText = document.querySelector('#statsSumMax')?.value;
+    sumFilterState = {
+      mode: ['typical', 'manual'].includes(mode) ? mode : 'off',
+      min: minText !== '' && Number.isInteger(Number(minText)) ? Number(minText) : null,
+      max: maxText !== '' && Number.isInteger(Number(maxText)) ? Number(maxText) : null
+    };
+    try { localStorage.setItem(SUM_FILTER_STORAGE_KEY, JSON.stringify(sumFilterState)); } catch {}
+    refreshSumFilter();
+  }
 
   function savedPreset() {
     try {
@@ -212,6 +349,8 @@
       return;
     }
     const profile = balancedProfile(draws, size);
+    const sumFilter = resolveSumFilter(draws, size);
+    if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -222,12 +361,13 @@
       attempts++;
       const dezenas = randomGame(size);
       const key = dezenas.join('-');
-      if (used.has(key) || !matchesBalancedProfile(dezenas, profile)) continue;
+      const total = dezenas.reduce((sum, number) => sum + number, 0);
+      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: `Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`,
+        observacao: appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -271,6 +411,8 @@
     const sums = draws.map(draw => draw.dezenas.reduce((total, n) => total + Number(n), 0));
     const sumBounds = profileBounds(sums, scale, size * (size + 1) / 2,
       size * (2 * rules.universe - size + 1) / 2);
+    const sumFilter = resolveSumFilter(draws, size);
+    if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -282,12 +424,12 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || total < sumBounds.min || total > sumBounds.max) continue;
+      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: `Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`,
+        observacao: appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -361,6 +503,8 @@
       return;
     }
     const delayByNumber = delaysInInterval(draws);
+    const sumFilter = resolveSumFilter(draws, size);
+    if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -371,13 +515,14 @@
       attempts++;
       const dezenas = weightedGame(size, delayByNumber);
       const key = dezenas.join('-');
-      if (used.has(key)) continue;
+      const total = dezenas.reduce((sum, number) => sum + number, 0);
+      if (used.has(key) || !sumFilterMatches(total, sumFilter)) continue;
       used.add(key);
       const averageDelay = dezenas.reduce((total, number) => total + delayByNumber[number], 0) / size;
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: `Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`,
+        observacao: appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -400,15 +545,72 @@
       : `${generated.length} de ${quantity} jogos Atrasadas foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
   }
 
+  function generateRandomWithSumFilter() {
+    const quantity = Number(document.querySelector('#gameSetCount')?.value);
+    const size = Number(document.querySelector('#gameSetSize')?.value);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+      toast('Informe uma quantidade inteira de jogos entre 1 e 100.');
+      return;
+    }
+    if (!Number.isInteger(size) || size < rules.minPicks || size > rules.maxPicks) {
+      toast(`Escolha de ${rules.minPicks} a ${rules.maxPicks} dezenas por jogo.`);
+      return;
+    }
+    const draws = selectedIntervalDraws();
+    const sumFilter = resolveSumFilter(draws, size);
+    if (!sumFilter.valid) { toast(sumFilter.error); return; }
+    const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
+      .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
+    const generated = [];
+    const batchName = `Conjunto aleatório com filtro de soma · ${new Date().toLocaleString('pt-BR')}`;
+    const maxAttempts = Math.max(2000, Math.min(100000, quantity * 2000));
+    let attempts = 0;
+    while (generated.length < quantity && attempts < maxAttempts) {
+      attempts++;
+      const dezenas = randomGame(size);
+      const total = dezenas.reduce((sum, number) => sum + number, 0);
+      const key = dezenas.join('-');
+      if (used.has(key) || !sumFilterMatches(total, sumFilter)) continue;
+      used.add(key);
+      generated.push({
+        id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
+        nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
+        observacao: appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter),
+        dezenas,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    if (!generated.length) {
+      toast('Nenhum jogo atendeu à faixa de soma. Amplie a faixa ou, para o modo típico, amplie o período estatístico.');
+      return;
+    }
+    const previous = data.games;
+    data.games = [...data.games, ...generated];
+    try { saveLocal(); }
+    catch {
+      data.games = previous;
+      toast('Não foi possível salvar os jogos neste dispositivo. Libere espaço no navegador e tente novamente.');
+      return;
+    }
+    render();
+    toast(generated.length === quantity
+      ? `${generated.length} jogos aleatórios com filtro de soma foram salvos individualmente.`
+      : `${generated.length} de ${quantity} jogos com filtro de soma foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
+  }
+
   function interceptStatisticalGeneration(event) {
     const button = event.target.closest('[data-action="generate-game-set"]');
     const preset = document.querySelector('#statsRangePreset')?.value;
-    if (!button || !['balanced', 'typical-sum', 'overdue'].includes(preset)) return;
+    const filterMode = sumFilterSettings().mode;
+    if (!button) return;
+    if (preset === 'random' && filterMode === 'off') return;
+    if (!['random', 'balanced', 'typical-sum', 'overdue'].includes(preset)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (preset === 'balanced') generateBalancedSet();
     else if (preset === 'typical-sum') generateTypicalSumSet();
-    else generateOverdueSet();
+    else if (preset === 'overdue') generateOverdueSet();
+    else generateRandomWithSumFilter();
   }
 
   function setEndpoint(endpoint, rawValue) {
@@ -445,6 +647,8 @@
       try { localStorage.setItem(PRESET_STORAGE_KEY, value); } catch {}
       refreshPresetNote();
     }
+    if (['statsSumFilterMode', 'statsSumMin', 'statsSumMax'].includes(event.target.id)) saveSumFilterFromInputs();
+    if (event.target.id === 'gameSetSize') refreshSumFilter();
   });
   document.addEventListener('click', interceptStatisticalGeneration, true);
 
