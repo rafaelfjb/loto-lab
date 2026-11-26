@@ -150,5 +150,6 @@ $('#drawDialog').addEventListener('click',e=>{if(e.target===$('#drawDialog'))$('
 );document.addEventListener('input',e=>{if(['filterNumber','filterFrom','filterTo','filterText'].includes(e.target.id))applyFilters();if(e.target.id==='raceSlider')drawRace(Number(e.target.value))});document.addEventListener('change',e=>{if(e.target.id==='gameTarget')setGameTarget(e.target.value);if(e.target.id==='comboSize')renderCombinationAnalysis(sortedDraws(),Number(e.target.value)||2);if(e.target.id==='sequenceSize')renderSequenceAnalysis(sortedDraws(),Number(e.target.value)||2);if(e.target.id==='csvFile'&&e.target.files?.[0]){const input=e.target;importFile(input.files[0]).finally(()=>{input.value=''})}});
 window.addEventListener('resize',()=>{if(data.view==='stats'&&data.draws.length)drawRace(raceIndex,false)});render();loadData();
 </script>
+<script src="./stats-range.js"></script>
 </body>
 </html>
