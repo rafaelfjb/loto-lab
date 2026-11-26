@@ -5,6 +5,7 @@
   let rangeState = null;
   let sumFilterState = null;
   let parityFilterState = null;
+  let borderCenterFilterState = null;
 
   function availableDraws() {
     const select = document.querySelector('#games #drawSelect');
@@ -100,6 +101,24 @@
         </div>
       </div>
       <p id="statsParityFilterSummary" class="game-set-note" aria-live="polite">O filtro pode ser combinado com qualquer estratégia; ímpares são complementares ao total de dezenas. Ele descreve o histórico e não aumenta a probabilidade de acerto.</p>
+      <div class="game-set-controls" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:10px">
+        <label class="filter-label" style="grid-column:1/-1">Filtro de borda e centro
+          <select id="statsBorderCenterFilterMode" class="field" aria-label="Modo do filtro de borda e centro">
+            <option value="off">Desativado</option>
+            <option value="typical">Faixa típica do período · percentis 5–95%</option>
+            <option value="manual">Faixa manual de dezenas na borda</option>
+          </select>
+        </label>
+        <div id="statsBorderCenterManualFields" style="display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+          <label class="filter-label">Mínimo na borda
+            <input id="statsBorderCenterMin" class="field" type="number" step="1" inputmode="numeric" aria-label="Quantidade mínima de dezenas na borda">
+          </label>
+          <label class="filter-label">Máximo na borda
+            <input id="statsBorderCenterMax" class="field" type="number" step="1" inputmode="numeric" aria-label="Quantidade máxima de dezenas na borda">
+          </label>
+        </div>
+      </div>
+      <p id="statsBorderCenterFilterSummary" class="game-set-note" aria-live="polite">As dezenas no centro são complementares às dezenas na borda. Este filtro descreve o histórico e não aumenta a probabilidade de acerto.</p>
       <p id="statsRangeSummary" class="game-set-note" aria-live="polite"></p>`;
     randomCard.insertAdjacentElement('beforebegin', card);
     return card;
@@ -130,6 +149,7 @@
       }
       refreshSumFilter();
       refreshParityFilter();
+      refreshBorderCenterFilter();
       return;
     }
 
@@ -157,6 +177,7 @@
     if (summary.textContent !== text) summary.textContent = text;
     refreshSumFilter();
     refreshParityFilter();
+    refreshBorderCenterFilter();
   }
 
   const PRESET_STORAGE_KEY = 'lotolab.stats-preset.v1';
@@ -395,6 +416,124 @@
     refreshParityFilter();
   }
 
+  const BORDER_CENTER_FILTER_STORAGE_KEY = 'lotolab.stats-border-center-filter.v1';
+
+  function savedBorderCenterFilter() {
+    try {
+      const value = JSON.parse(localStorage.getItem(BORDER_CENTER_FILTER_STORAGE_KEY) || 'null');
+      const mode = ['typical', 'manual'].includes(value?.mode) ? value.mode : 'off';
+      return {
+        mode,
+        min: Number.isInteger(value?.min) ? value.min : null,
+        max: Number.isInteger(value?.max) ? value.max : null
+      };
+    } catch { return { mode: 'off', min: null, max: null }; }
+  }
+
+  function borderCenterFilterSettings() {
+    if (!borderCenterFilterState) borderCenterFilterState = savedBorderCenterFilter();
+    return borderCenterFilterState;
+  }
+
+  function borderCenterBoundsForSize(size) {
+    const borderSlots = Array.from({ length: rules.universe }, (_, index) => index + 1)
+      .filter(isBorderNumber).length;
+    const centerSlots = rules.universe - borderSlots;
+    return { min: Math.max(0, size - centerSlots), max: Math.min(size, borderSlots), borderSlots, centerSlots };
+  }
+
+  function refreshBorderCenterFilter() {
+    const modeInput = document.querySelector('#statsBorderCenterFilterMode');
+    const minInput = document.querySelector('#statsBorderCenterMin');
+    const maxInput = document.querySelector('#statsBorderCenterMax');
+    const fields = document.querySelector('#statsBorderCenterManualFields');
+    const summary = document.querySelector('#statsBorderCenterFilterSummary');
+    if (!modeInput || !summary) return;
+    const settings = borderCenterFilterSettings();
+    const size = Number(document.querySelector('#gameSetSize')?.value) || rules.drawCount;
+    const possible = borderCenterBoundsForSize(size);
+    modeInput.value = settings.mode;
+    if (fields) fields.style.display = settings.mode === 'manual' ? 'grid' : 'none';
+    if (minInput && maxInput) {
+      minInput.min = maxInput.min = String(possible.min);
+      minInput.max = maxInput.max = String(possible.max);
+      const min = Math.min(possible.max, Math.max(possible.min, settings.min ?? possible.min));
+      const max = Math.min(possible.max, Math.max(possible.min, settings.max ?? possible.max));
+      minInput.value = String(min);
+      maxInput.value = String(Math.max(min, max));
+    }
+    let text;
+    if (settings.mode === 'manual') {
+      const minimum = Number(minInput?.value ?? possible.min);
+      const maximum = Number(maxInput?.value ?? possible.max);
+      text = `Faixa manual: ${minimum}–${maximum} dezenas na borda (equivale a ${size - maximum}–${size - minimum} no centro). Para ${size} dezenas, são possíveis ${possible.min}–${possible.max} na borda.`;
+    } else if (settings.mode === 'typical') {
+      const draws = selectedIntervalDraws();
+      if (!draws.length) text = 'Selecione um intervalo com concursos carregados para calcular a faixa típica de borda e centro.';
+      else {
+        const scale = size / rules.drawCount;
+        const borders = draws.map(draw => draw.dezenas.filter(number => isBorderNumber(Number(number))).length);
+        const bounds = profileBounds(borders, scale, possible.min, possible.max);
+        text = `Faixa típica aplicada: ${bounds.min}–${bounds.max} dezenas na borda (equivale a ${size - bounds.max}–${size - bounds.min} no centro), percentis 5–95% dos concursos #${draws[0].numero}–#${draws.at(-1).numero}.`;
+      }
+    } else {
+      text = 'Filtro de borda e centro desativado.';
+    }
+    if (summary.textContent !== text) summary.textContent = text;
+  }
+
+  function resolveBorderCenterFilter(draws, size) {
+    const mode = borderCenterFilterSettings().mode;
+    if (mode === 'off') return { valid: true, mode, bounds: null };
+    const possible = borderCenterBoundsForSize(size);
+    if (mode === 'manual') {
+      const minInput = document.querySelector('#statsBorderCenterMin');
+      const maxInput = document.querySelector('#statsBorderCenterMax');
+      const minText = minInput ? minInput.value : borderCenterFilterSettings().min;
+      const maxText = maxInput ? maxInput.value : borderCenterFilterSettings().max;
+      const min = minText === '' || minText == null ? NaN : Number(minText);
+      const max = maxText === '' || maxText == null ? NaN : Number(maxText);
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < possible.min || max > possible.max || min > max) {
+        return { valid: false, error: `Informe uma faixa inteira de dezenas na borda entre ${possible.min} e ${possible.max}, com mínimo menor ou igual ao máximo.` };
+      }
+      return { valid: true, mode, bounds: { min, max } };
+    }
+    if (!draws.length) return { valid: false, error: 'Não há concursos válidos carregados no intervalo para calcular a faixa típica de borda e centro.' };
+    const scale = size / rules.drawCount;
+    const borders = draws.map(draw => draw.dezenas.filter(number => isBorderNumber(Number(number))).length);
+    return { valid: true, mode, bounds: profileBounds(borders, scale, possible.min, possible.max) };
+  }
+
+  function borderCenterFilterMatches(numbers, filter) {
+    if (!filter?.bounds) return true;
+    const borderCount = numbers.filter(isBorderNumber).length;
+    return borderCount >= filter.bounds.min && borderCount <= filter.bounds.max;
+  }
+
+  function borderCenterFilterAnnotation(filter, size) {
+    if (!filter || filter.mode === 'off' || !filter.bounds) return '';
+    const label = filter.mode === 'manual' ? 'manual' : 'típica do período (percentis 5–95%)';
+    return `Filtro borda/centro ${label}: ${filter.bounds.min}–${filter.bounds.max} na borda e ${size - filter.bounds.max}–${size - filter.bounds.min} no centro.`;
+  }
+
+  function appendBorderCenterFilterAnnotation(observation, filter, size) {
+    const annotation = borderCenterFilterAnnotation(filter, size);
+    return annotation ? `${observation} ${annotation}` : observation;
+  }
+
+  function saveBorderCenterFilterFromInputs() {
+    const mode = document.querySelector('#statsBorderCenterFilterMode')?.value;
+    const minText = document.querySelector('#statsBorderCenterMin')?.value;
+    const maxText = document.querySelector('#statsBorderCenterMax')?.value;
+    borderCenterFilterState = {
+      mode: ['typical', 'manual'].includes(mode) ? mode : 'off',
+      min: minText !== '' && Number.isInteger(Number(minText)) ? Number(minText) : null,
+      max: maxText !== '' && Number.isInteger(Number(maxText)) ? Number(maxText) : null
+    };
+    try { localStorage.setItem(BORDER_CENTER_FILTER_STORAGE_KEY, JSON.stringify(borderCenterFilterState)); } catch {}
+    refreshBorderCenterFilter();
+  }
+
   function savedPreset() {
     try {
       const preset = localStorage.getItem(PRESET_STORAGE_KEY);
@@ -492,6 +631,8 @@
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const parityFilter = resolveParityFilter(draws, size);
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
+    const borderCenterFilter = resolveBorderCenterFilter(draws, size);
+    if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -503,12 +644,12 @@
       const dezenas = randomGame(size);
       const key = dezenas.join('-');
       const total = dezenas.reduce((sum, number) => sum + number, 0);
-      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
+      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter), parityFilter, size),
+        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter), parityFilter, size), borderCenterFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -556,6 +697,8 @@
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const parityFilter = resolveParityFilter(draws, size);
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
+    const borderCenterFilter = resolveBorderCenterFilter(draws, size);
+    if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -567,12 +710,12 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
+      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter), parityFilter, size),
+        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter), parityFilter, size), borderCenterFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -650,6 +793,8 @@
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const parityFilter = resolveParityFilter(draws, size);
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
+    const borderCenterFilter = resolveBorderCenterFilter(draws, size);
+    if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -661,13 +806,13 @@
       const dezenas = weightedGame(size, delayByNumber);
       const key = dezenas.join('-');
       const total = dezenas.reduce((sum, number) => sum + number, 0);
-      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
+      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
       used.add(key);
       const averageDelay = dezenas.reduce((total, number) => total + delayByNumber[number], 0) / size;
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter), parityFilter, size),
+        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter), parityFilter, size), borderCenterFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -706,6 +851,8 @@
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
     const parityFilter = resolveParityFilter(draws, size);
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
+    const borderCenterFilter = resolveBorderCenterFilter(draws, size);
+    if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -717,12 +864,12 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
+      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter), parityFilter, size),
+        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter), parityFilter, size), borderCenterFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -750,8 +897,9 @@
     const preset = document.querySelector('#statsRangePreset')?.value;
     const filterMode = sumFilterSettings().mode;
     const parityMode = parityFilterSettings().mode;
+    const borderCenterMode = borderCenterFilterSettings().mode;
     if (!button) return;
-    if (preset === 'random' && filterMode === 'off' && parityMode === 'off') return;
+    if (preset === 'random' && filterMode === 'off' && parityMode === 'off' && borderCenterMode === 'off') return;
     if (!['random', 'balanced', 'typical-sum', 'overdue'].includes(preset)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -797,7 +945,8 @@
     }
     if (['statsSumFilterMode', 'statsSumMin', 'statsSumMax'].includes(event.target.id)) saveSumFilterFromInputs();
     if (['statsParityFilterMode', 'statsParityMin', 'statsParityMax'].includes(event.target.id)) saveParityFilterFromInputs();
-    if (event.target.id === 'gameSetSize') { refreshSumFilter(); refreshParityFilter(); }
+    if (['statsBorderCenterFilterMode', 'statsBorderCenterMin', 'statsBorderCenterMax'].includes(event.target.id)) saveBorderCenterFilterFromInputs();
+    if (event.target.id === 'gameSetSize') { refreshSumFilter(); refreshParityFilter(); refreshBorderCenterFilter(); }
   });
   document.addEventListener('click', interceptStatisticalGeneration, true);
 
