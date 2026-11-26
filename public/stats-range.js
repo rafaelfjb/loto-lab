@@ -4,6 +4,7 @@
   const STORAGE_KEY = 'lotolab.stats-range.v1';
   let rangeState = null;
   let sumFilterState = null;
+  let parityFilterState = null;
 
   function availableDraws() {
     const select = document.querySelector('#games #drawSelect');
@@ -81,6 +82,24 @@
         </div>
       </div>
       <p id="statsSumFilterSummary" class="game-set-note" aria-live="polite">O filtro adicional pode ser combinado com qualquer estratégia.</p>
+      <div class="game-set-controls" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:10px">
+        <label class="filter-label" style="grid-column:1/-1">Filtro de pares e ímpares
+          <select id="statsParityFilterMode" class="field" aria-label="Modo do filtro de pares e ímpares">
+            <option value="off">Desativado</option>
+            <option value="typical">Faixa típica do período · percentis 5–95%</option>
+            <option value="manual">Faixa manual de pares</option>
+          </select>
+        </label>
+        <div id="statsParityManualFields" style="display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+          <label class="filter-label">Mínimo de pares
+            <input id="statsParityMin" class="field" type="number" step="1" inputmode="numeric" aria-label="Quantidade mínima de pares">
+          </label>
+          <label class="filter-label">Máximo de pares
+            <input id="statsParityMax" class="field" type="number" step="1" inputmode="numeric" aria-label="Quantidade máxima de pares">
+          </label>
+        </div>
+      </div>
+      <p id="statsParityFilterSummary" class="game-set-note" aria-live="polite">O filtro pode ser combinado com qualquer estratégia; ímpares são complementares ao total de dezenas. Ele descreve o histórico e não aumenta a probabilidade de acerto.</p>
       <p id="statsRangeSummary" class="game-set-note" aria-live="polite"></p>`;
     randomCard.insertAdjacentElement('beforebegin', card);
     return card;
@@ -110,6 +129,7 @@
         summary.textContent = 'Carregue resultados para escolher um intervalo.';
       }
       refreshSumFilter();
+      refreshParityFilter();
       return;
     }
 
@@ -136,6 +156,7 @@
     if (countLabel.textContent !== label) countLabel.textContent = label;
     if (summary.textContent !== text) summary.textContent = text;
     refreshSumFilter();
+    refreshParityFilter();
   }
 
   const PRESET_STORAGE_KEY = 'lotolab.stats-preset.v1';
@@ -256,6 +277,124 @@
     refreshSumFilter();
   }
 
+
+  const PARITY_FILTER_STORAGE_KEY = 'lotolab.stats-parity-filter.v1';
+
+  function savedParityFilter() {
+    try {
+      const value = JSON.parse(localStorage.getItem(PARITY_FILTER_STORAGE_KEY) || 'null');
+      const mode = ['typical', 'manual'].includes(value?.mode) ? value.mode : 'off';
+      return {
+        mode,
+        min: Number.isInteger(value?.min) ? value.min : null,
+        max: Number.isInteger(value?.max) ? value.max : null
+      };
+    } catch { return { mode: 'off', min: null, max: null }; }
+  }
+
+  function parityFilterSettings() {
+    if (!parityFilterState) parityFilterState = savedParityFilter();
+    return parityFilterState;
+  }
+
+  function parityBoundsForSize(size) {
+    const evenNumbers = Math.floor(rules.universe / 2);
+    const oddNumbers = rules.universe - evenNumbers;
+    return { min: Math.max(0, size - oddNumbers), max: Math.min(size, evenNumbers) };
+  }
+
+  function refreshParityFilter() {
+    const modeInput = document.querySelector('#statsParityFilterMode');
+    const minInput = document.querySelector('#statsParityMin');
+    const maxInput = document.querySelector('#statsParityMax');
+    const fields = document.querySelector('#statsParityManualFields');
+    const summary = document.querySelector('#statsParityFilterSummary');
+    if (!modeInput || !summary) return;
+    const settings = parityFilterSettings();
+    const size = Number(document.querySelector('#gameSetSize')?.value) || rules.drawCount;
+    const possible = parityBoundsForSize(size);
+    modeInput.value = settings.mode;
+    if (fields) fields.style.display = settings.mode === 'manual' ? 'grid' : 'none';
+    if (minInput && maxInput) {
+      minInput.min = maxInput.min = String(possible.min);
+      minInput.max = maxInput.max = String(possible.max);
+      const min = Math.min(possible.max, Math.max(possible.min, settings.min ?? possible.min));
+      const max = Math.min(possible.max, Math.max(possible.min, settings.max ?? possible.max));
+      minInput.value = String(min);
+      maxInput.value = String(Math.max(min, max));
+    }
+    let text;
+    if (settings.mode === 'manual') {
+      const minimum = Number(minInput?.value ?? possible.min);
+      const maximum = Number(maxInput?.value ?? possible.max);
+      text = `Faixa manual: ${minimum}–${maximum} pares (equivale a ${size - maximum}–${size - minimum} ímpares). Para ${size} dezenas, são possíveis ${possible.min}–${possible.max} pares.`;
+    } else if (settings.mode === 'typical') {
+      const draws = selectedIntervalDraws();
+      if (!draws.length) text = 'Selecione um intervalo com concursos carregados para calcular a faixa típica de pares e ímpares.';
+      else {
+        const scale = size / rules.drawCount;
+        const evens = draws.map(draw => draw.dezenas.filter(number => Number(number) % 2 === 0).length);
+        const bounds = profileBounds(evens, scale, possible.min, possible.max);
+        text = `Faixa típica aplicada: ${bounds.min}–${bounds.max} pares (equivale a ${size - bounds.max}–${size - bounds.min} ímpares), percentis 5–95% dos concursos #${draws[0].numero}–#${draws.at(-1).numero}.`;
+      }
+    } else {
+      text = 'Filtro de pares e ímpares desativado.';
+    }
+    if (summary.textContent !== text) summary.textContent = text;
+  }
+
+  function resolveParityFilter(draws, size) {
+    const mode = parityFilterSettings().mode;
+    if (mode === 'off') return { valid: true, mode, bounds: null };
+    const possible = parityBoundsForSize(size);
+    if (mode === 'manual') {
+      const minInput = document.querySelector('#statsParityMin');
+      const maxInput = document.querySelector('#statsParityMax');
+      const minText = minInput ? minInput.value : parityFilterSettings().min;
+      const maxText = maxInput ? maxInput.value : parityFilterSettings().max;
+      const min = minText === '' || minText == null ? NaN : Number(minText);
+      const max = maxText === '' || maxText == null ? NaN : Number(maxText);
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < possible.min || max > possible.max || min > max) {
+        return { valid: false, error: `Informe uma faixa inteira de pares entre ${possible.min} e ${possible.max}, com mínimo menor ou igual ao máximo.` };
+      }
+      return { valid: true, mode, bounds: { min, max } };
+    }
+    if (!draws.length) return { valid: false, error: 'Não há concursos válidos carregados no intervalo para calcular a faixa típica de pares e ímpares.' };
+    const scale = size / rules.drawCount;
+    const evens = draws.map(draw => draw.dezenas.filter(number => Number(number) % 2 === 0).length);
+    return { valid: true, mode, bounds: profileBounds(evens, scale, possible.min, possible.max) };
+  }
+
+  function parityFilterMatches(numbers, filter) {
+    if (!filter?.bounds) return true;
+    const evenCount = numbers.filter(number => number % 2 === 0).length;
+    return evenCount >= filter.bounds.min && evenCount <= filter.bounds.max;
+  }
+
+  function parityFilterAnnotation(filter, size) {
+    if (!filter || filter.mode === 'off' || !filter.bounds) return '';
+    const label = filter.mode === 'manual' ? 'manual' : 'típica do período (percentis 5–95%)';
+    return `Filtro par/ímpar ${label}: ${filter.bounds.min}–${filter.bounds.max} pares e ${size - filter.bounds.max}–${size - filter.bounds.min} ímpares.`;
+  }
+
+  function appendParityFilterAnnotation(observation, filter, size) {
+    const annotation = parityFilterAnnotation(filter, size);
+    return annotation ? `${observation} ${annotation}` : observation;
+  }
+
+  function saveParityFilterFromInputs() {
+    const mode = document.querySelector('#statsParityFilterMode')?.value;
+    const minText = document.querySelector('#statsParityMin')?.value;
+    const maxText = document.querySelector('#statsParityMax')?.value;
+    parityFilterState = {
+      mode: ['typical', 'manual'].includes(mode) ? mode : 'off',
+      min: minText !== '' && Number.isInteger(Number(minText)) ? Number(minText) : null,
+      max: maxText !== '' && Number.isInteger(Number(maxText)) ? Number(maxText) : null
+    };
+    try { localStorage.setItem(PARITY_FILTER_STORAGE_KEY, JSON.stringify(parityFilterState)); } catch {}
+    refreshParityFilter();
+  }
+
   function savedPreset() {
     try {
       const preset = localStorage.getItem(PRESET_STORAGE_KEY);
@@ -351,6 +490,8 @@
     const profile = balancedProfile(draws, size);
     const sumFilter = resolveSumFilter(draws, size);
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
+    const parityFilter = resolveParityFilter(draws, size);
+    if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -362,12 +503,12 @@
       const dezenas = randomGame(size);
       const key = dezenas.join('-');
       const total = dezenas.reduce((sum, number) => sum + number, 0);
-      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter)) continue;
+      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter),
+        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter), parityFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -413,6 +554,8 @@
       size * (2 * rules.universe - size + 1) / 2);
     const sumFilter = resolveSumFilter(draws, size);
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
+    const parityFilter = resolveParityFilter(draws, size);
+    if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -424,12 +567,12 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter)) continue;
+      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter),
+        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter), parityFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -505,6 +648,8 @@
     const delayByNumber = delaysInInterval(draws);
     const sumFilter = resolveSumFilter(draws, size);
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
+    const parityFilter = resolveParityFilter(draws, size);
+    if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -516,13 +661,13 @@
       const dezenas = weightedGame(size, delayByNumber);
       const key = dezenas.join('-');
       const total = dezenas.reduce((sum, number) => sum + number, 0);
-      if (used.has(key) || !sumFilterMatches(total, sumFilter)) continue;
+      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
       used.add(key);
       const averageDelay = dezenas.reduce((total, number) => total + delayByNumber[number], 0) / size;
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter),
+        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter), parityFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -559,10 +704,12 @@
     const draws = selectedIntervalDraws();
     const sumFilter = resolveSumFilter(draws, size);
     if (!sumFilter.valid) { toast(sumFilter.error); return; }
+    const parityFilter = resolveParityFilter(draws, size);
+    if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
-    const batchName = `Conjunto aleatório com filtro de soma · ${new Date().toLocaleString('pt-BR')}`;
+    const batchName = `Conjunto aleatório com filtros estatísticos · ${new Date().toLocaleString('pt-BR')}`;
     const maxAttempts = Math.max(2000, Math.min(100000, quantity * 2000));
     let attempts = 0;
     while (generated.length < quantity && attempts < maxAttempts) {
@@ -570,18 +717,18 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || !sumFilterMatches(total, sumFilter)) continue;
+      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter),
+        observacao: appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter), parityFilter, size),
         dezenas,
         updatedAt: new Date().toISOString()
       });
     }
     if (!generated.length) {
-      toast('Nenhum jogo atendeu à faixa de soma. Amplie a faixa ou, para o modo típico, amplie o período estatístico.');
+      toast('Nenhum jogo atendeu aos filtros ativos. Ajuste a faixa de soma ou de pares/ímpares e tente novamente.');
       return;
     }
     const previous = data.games;
@@ -594,16 +741,17 @@
     }
     render();
     toast(generated.length === quantity
-      ? `${generated.length} jogos aleatórios com filtro de soma foram salvos individualmente.`
-      : `${generated.length} de ${quantity} jogos com filtro de soma foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
+      ? `${generated.length} jogos aleatórios com filtros estatísticos foram salvos individualmente.`
+      : `${generated.length} de ${quantity} jogos com filtros estatísticos foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
   }
 
   function interceptStatisticalGeneration(event) {
     const button = event.target.closest('[data-action="generate-game-set"]');
     const preset = document.querySelector('#statsRangePreset')?.value;
     const filterMode = sumFilterSettings().mode;
+    const parityMode = parityFilterSettings().mode;
     if (!button) return;
-    if (preset === 'random' && filterMode === 'off') return;
+    if (preset === 'random' && filterMode === 'off' && parityMode === 'off') return;
     if (!['random', 'balanced', 'typical-sum', 'overdue'].includes(preset)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -648,7 +796,8 @@
       refreshPresetNote();
     }
     if (['statsSumFilterMode', 'statsSumMin', 'statsSumMax'].includes(event.target.id)) saveSumFilterFromInputs();
-    if (event.target.id === 'gameSetSize') refreshSumFilter();
+    if (['statsParityFilterMode', 'statsParityMin', 'statsParityMax'].includes(event.target.id)) saveParityFilterFromInputs();
+    if (event.target.id === 'gameSetSize') { refreshSumFilter(); refreshParityFilter(); }
   });
   document.addEventListener('click', interceptStatisticalGeneration, true);
 
