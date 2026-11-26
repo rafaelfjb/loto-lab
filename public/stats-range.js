@@ -57,9 +57,10 @@
         <select id="statsRangePreset" class="field" aria-label="Estratégia de geração de jogos">
           <option value="random">Aleatório, sem filtros estatísticos</option>
           <option value="balanced">Equilibrado · perfil histórico</option>
+          <option value="typical-sum">Soma típica · faixa histórica</option>
         </select>
       </label>
-      <p class="game-set-note">O preset Equilibrado aceita jogos dentro dos percentis 5–95% observados no intervalo para soma, pares, borda/centro e distribuição nas faixas verticais. Para jogos com mais de 15 dezenas, as faixas são ajustadas proporcionalmente.</p>
+      <p id="statsRangePresetNote" class="game-set-note">Equilibrado aplica filtros de soma, pares, borda/centro e faixas verticais conforme o perfil histórico. Soma típica filtra apenas pela faixa histórica de soma. Jogos com mais de 15 dezenas têm as faixas ajustadas proporcionalmente.</p>
       <p id="statsRangeSummary" class="game-set-note" aria-live="polite"></p>`;
     randomCard.insertAdjacentElement('beforebegin', card);
     return card;
@@ -99,6 +100,7 @@
     const preset = card.querySelector('#statsRangePreset');
     preset.disabled = false;
     preset.value = savedPreset();
+    refreshPresetNote();
 
     if (!rangeState || rangeState.start < min || rangeState.start > max || rangeState.end < min || rangeState.end > max) {
       rangeState = savedRange(min, max);
@@ -117,8 +119,22 @@
   const PRESET_STORAGE_KEY = 'lotolab.stats-preset.v1';
 
   function savedPreset() {
-    try { return localStorage.getItem(PRESET_STORAGE_KEY) === 'balanced' ? 'balanced' : 'random'; }
-    catch { return 'random'; }
+    try {
+      const preset = localStorage.getItem(PRESET_STORAGE_KEY);
+      return preset === 'balanced' || preset === 'typical-sum' ? preset : 'random';
+    } catch { return 'random'; }
+  }
+
+  function refreshPresetNote() {
+    const note = document.querySelector('#statsRangePresetNote');
+    const preset = document.querySelector('#statsRangePreset')?.value;
+    if (!note) return;
+    const text = preset === 'typical-sum'
+      ? 'Soma típica aceita jogos cuja soma fique entre os percentis 5–95% das somas observadas no intervalo selecionado. Para jogos com mais de 15 dezenas, a faixa é ajustada proporcionalmente.'
+      : preset === 'balanced'
+        ? 'Equilibrado aplica filtros dos percentis 5–95% observados no intervalo para soma, pares, borda/centro e faixas verticais. Para jogos com mais de 15 dezenas, as faixas são ajustadas proporcionalmente.'
+        : 'Aleatório não aplica filtros estatísticos. O intervalo será usado quando você selecionar um preset estatístico.';
+    if (note.textContent !== text) note.textContent = text;
   }
 
   function selectedIntervalDraws() {
@@ -231,12 +247,74 @@
       : `${generated.length} de ${quantity} jogos equilibrados foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
   }
 
-  function interceptBalancedGeneration(event) {
+  function generateTypicalSumSet() {
+    const input = document.querySelector('#gameSetCount');
+    const quantity = Number(input?.value);
+    const size = Number(document.querySelector('#gameSetSize')?.value);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+      toast('Informe uma quantidade inteira de jogos entre 1 e 100.');
+      return;
+    }
+    if (!Number.isInteger(size) || size < rules.minPicks || size > rules.maxPicks) {
+      toast(`Escolha de ${rules.minPicks} a ${rules.maxPicks} dezenas por jogo.`);
+      return;
+    }
+    const draws = selectedIntervalDraws();
+    if (!draws.length) {
+      toast('Não há concursos válidos carregados neste intervalo para calcular a faixa de soma.');
+      return;
+    }
+    const scale = size / rules.drawCount;
+    const sums = draws.map(draw => draw.dezenas.reduce((total, n) => total + Number(n), 0));
+    const sumBounds = profileBounds(sums, scale, size * (size + 1) / 2,
+      size * (2 * rules.universe - size + 1) / 2);
+    const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
+      .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
+    const generated = [];
+    const batchName = `Conjunto soma típica · ${new Date().toLocaleString('pt-BR')}`;
+    const maxAttempts = Math.max(2000, Math.min(100000, quantity * 2000));
+    let attempts = 0;
+    while (generated.length < quantity && attempts < maxAttempts) {
+      attempts++;
+      const dezenas = randomGame(size);
+      const total = dezenas.reduce((sum, number) => sum + number, 0);
+      const key = dezenas.join('-');
+      if (used.has(key) || total < sumBounds.min || total > sumBounds.max) continue;
+      used.add(key);
+      generated.push({
+        id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
+        nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
+        observacao: `Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`,
+        dezenas,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    if (!generated.length) {
+      toast('Nenhum jogo atendeu à faixa de soma típica neste intervalo. Amplie o período ou use o modo aleatório sem filtros.');
+      return;
+    }
+    const previous = data.games;
+    data.games = [...data.games, ...generated];
+    try { saveLocal(); }
+    catch {
+      data.games = previous;
+      toast('Não foi possível salvar os jogos neste dispositivo. Libere espaço no navegador e tente novamente.');
+      return;
+    }
+    render();
+    toast(generated.length === quantity
+      ? `${generated.length} jogos de soma típica com ${size} dezenas foram salvos individualmente.`
+      : `${generated.length} de ${quantity} jogos de soma típica foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
+  }
+
+  function interceptStatisticalGeneration(event) {
     const button = event.target.closest('[data-action="generate-game-set"]');
-    if (!button || document.querySelector('#statsRangePreset')?.value !== 'balanced') return;
+    const preset = document.querySelector('#statsRangePreset')?.value;
+    if (!button || !['balanced', 'typical-sum'].includes(preset)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    generateBalancedSet();
+    if (preset === 'balanced') generateBalancedSet();
+    else generateTypicalSumSet();
   }
 
   function setEndpoint(endpoint, rawValue) {
@@ -269,10 +347,12 @@
     if (event.target.id === 'statsRangeStart') setEndpoint('start', event.target.value);
     if (event.target.id === 'statsRangeEnd') setEndpoint('end', event.target.value);
     if (event.target.id === 'statsRangePreset') {
-      try { localStorage.setItem(PRESET_STORAGE_KEY, event.target.value === 'balanced' ? 'balanced' : 'random'); } catch {}
+      const value = ['balanced', 'typical-sum'].includes(event.target.value) ? event.target.value : 'random';
+      try { localStorage.setItem(PRESET_STORAGE_KEY, value); } catch {}
+      refreshPresetNote();
     }
   });
-  document.addEventListener('click', interceptBalancedGeneration, true);
+  document.addEventListener('click', interceptStatisticalGeneration, true);
 
   const observer = new MutationObserver(refresh);
   const games = document.querySelector('#games');
