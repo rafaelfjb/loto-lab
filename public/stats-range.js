@@ -58,6 +58,7 @@
           <option value="random">Aleatório, sem filtros estatísticos</option>
           <option value="balanced">Equilibrado · perfil histórico</option>
           <option value="typical-sum">Soma típica · faixa histórica</option>
+          <option value="overdue">Atrasadas · maior tempo sem sair</option>
         </select>
       </label>
       <p id="statsRangePresetNote" class="game-set-note">Equilibrado aplica filtros de soma, pares, borda/centro e faixas verticais conforme o perfil histórico. Soma típica filtra apenas pela faixa histórica de soma. Jogos com mais de 15 dezenas têm as faixas ajustadas proporcionalmente.</p>
@@ -121,7 +122,7 @@
   function savedPreset() {
     try {
       const preset = localStorage.getItem(PRESET_STORAGE_KEY);
-      return preset === 'balanced' || preset === 'typical-sum' ? preset : 'random';
+      return ['balanced', 'typical-sum', 'overdue'].includes(preset) ? preset : 'random';
     } catch { return 'random'; }
   }
 
@@ -133,7 +134,9 @@
       ? 'Soma típica aceita jogos cuja soma fique entre os percentis 5–95% das somas observadas no intervalo selecionado. Para jogos com mais de 15 dezenas, a faixa é ajustada proporcionalmente.'
       : preset === 'balanced'
         ? 'Equilibrado aplica filtros dos percentis 5–95% observados no intervalo para soma, pares, borda/centro e faixas verticais. Para jogos com mais de 15 dezenas, as faixas são ajustadas proporcionalmente.'
-        : 'Aleatório não aplica filtros estatísticos. O intervalo será usado quando você selecionar um preset estatístico.';
+        : preset === 'overdue'
+          ? 'Atrasadas dá maior peso às dezenas há mais concursos sem sair no intervalo selecionado (peso = 1 + atraso). Isso não prevê resultados nem aumenta a probabilidade de acerto.'
+          : 'Aleatório não aplica filtros estatísticos. O intervalo será usado quando você selecionar um preset estatístico.';
     if (note.textContent !== text) note.textContent = text;
   }
 
@@ -307,14 +310,105 @@
       : `${generated.length} de ${quantity} jogos de soma típica foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
   }
 
+  function delaysInInterval(draws) {
+    const delayByNumber = new Array(rules.universe + 1).fill(draws.length);
+    const found = new Set();
+    for (let index = draws.length - 1; index >= 0; index--) {
+      for (const rawNumber of draws[index].dezenas) {
+        const number = Number(rawNumber);
+        if (!found.has(number)) {
+          delayByNumber[number] = draws.length - 1 - index;
+          found.add(number);
+        }
+      }
+    }
+    return delayByNumber;
+  }
+
+  function weightedGame(size, delayByNumber) {
+    const pool = Array.from({ length: rules.universe }, (_, index) => index + 1);
+    const chosen = [];
+    while (chosen.length < size && pool.length) {
+      const totalWeight = pool.reduce((total, number) => total + 1 + delayByNumber[number], 0);
+      let ticket = Math.random() * totalWeight;
+      let selectedIndex = pool.length - 1;
+      for (let index = 0; index < pool.length; index++) {
+        ticket -= 1 + delayByNumber[pool[index]];
+        if (ticket < 0) {
+          selectedIndex = index;
+          break;
+        }
+      }
+      chosen.push(pool.splice(selectedIndex, 1)[0]);
+    }
+    return chosen.sort((a, b) => a - b);
+  }
+
+  function generateOverdueSet() {
+    const quantity = Number(document.querySelector('#gameSetCount')?.value);
+    const size = Number(document.querySelector('#gameSetSize')?.value);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+      toast('Informe uma quantidade inteira de jogos entre 1 e 100.');
+      return;
+    }
+    if (!Number.isInteger(size) || size < rules.minPicks || size > rules.maxPicks) {
+      toast(`Escolha de ${rules.minPicks} a ${rules.maxPicks} dezenas por jogo.`);
+      return;
+    }
+    const draws = selectedIntervalDraws();
+    if (!draws.length) {
+      toast('Não há concursos válidos carregados neste intervalo para calcular os atrasos.');
+      return;
+    }
+    const delayByNumber = delaysInInterval(draws);
+    const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
+      .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
+    const generated = [];
+    const batchName = `Conjunto atrasadas · ${new Date().toLocaleString('pt-BR')}`;
+    const maxAttempts = Math.max(2000, Math.min(100000, quantity * 2000));
+    let attempts = 0;
+    while (generated.length < quantity && attempts < maxAttempts) {
+      attempts++;
+      const dezenas = weightedGame(size, delayByNumber);
+      const key = dezenas.join('-');
+      if (used.has(key)) continue;
+      used.add(key);
+      const averageDelay = dezenas.reduce((total, number) => total + delayByNumber[number], 0) / size;
+      generated.push({
+        id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
+        nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
+        observacao: `Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`,
+        dezenas,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    if (!generated.length) {
+      toast('Não foi possível gerar combinações inéditas neste intervalo. Amplie o período ou use outro preset.');
+      return;
+    }
+    const previous = data.games;
+    data.games = [...data.games, ...generated];
+    try { saveLocal(); }
+    catch {
+      data.games = previous;
+      toast('Não foi possível salvar os jogos neste dispositivo. Libere espaço no navegador e tente novamente.');
+      return;
+    }
+    render();
+    toast(generated.length === quantity
+      ? `${generated.length} jogos Atrasadas de ${size} dezenas foram salvos individualmente.`
+      : `${generated.length} de ${quantity} jogos Atrasadas foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
+  }
+
   function interceptStatisticalGeneration(event) {
     const button = event.target.closest('[data-action="generate-game-set"]');
     const preset = document.querySelector('#statsRangePreset')?.value;
-    if (!button || !['balanced', 'typical-sum'].includes(preset)) return;
+    if (!button || !['balanced', 'typical-sum', 'overdue'].includes(preset)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (preset === 'balanced') generateBalancedSet();
-    else generateTypicalSumSet();
+    else if (preset === 'typical-sum') generateTypicalSumSet();
+    else generateOverdueSet();
   }
 
   function setEndpoint(endpoint, rawValue) {
@@ -347,7 +441,7 @@
     if (event.target.id === 'statsRangeStart') setEndpoint('start', event.target.value);
     if (event.target.id === 'statsRangeEnd') setEndpoint('end', event.target.value);
     if (event.target.id === 'statsRangePreset') {
-      const value = ['balanced', 'typical-sum'].includes(event.target.value) ? event.target.value : 'random';
+      const value = ['balanced', 'typical-sum', 'overdue'].includes(event.target.value) ? event.target.value : 'random';
       try { localStorage.setItem(PRESET_STORAGE_KEY, value); } catch {}
       refreshPresetNote();
     }
