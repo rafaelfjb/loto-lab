@@ -53,6 +53,13 @@
           <input id="statsRangeEnd" class="field" type="number" inputmode="numeric" step="1" aria-label="Concurso final do intervalo estatístico">
         </label>
       </div>
+      <label class="filter-label" style="max-width:320px;margin-top:10px">Estratégia de geração
+        <select id="statsRangePreset" class="field" aria-label="Estratégia de geração de jogos">
+          <option value="random">Aleatório, sem filtros estatísticos</option>
+          <option value="balanced">Equilibrado · perfil histórico</option>
+        </select>
+      </label>
+      <p class="game-set-note">O preset Equilibrado aceita jogos dentro dos percentis 5–95% observados no intervalo para soma, pares, borda/centro e distribuição nas faixas verticais. Para jogos com mais de 15 dezenas, as faixas são ajustadas proporcionalmente.</p>
       <p id="statsRangeSummary" class="game-set-note" aria-live="polite"></p>`;
     randomCard.insertAdjacentElement('beforebegin', card);
     return card;
@@ -70,6 +77,7 @@
     if (!draws.length) {
       startInput.disabled = true;
       endInput.disabled = true;
+      card.querySelector('#statsRangePreset').disabled = true;
       startInput.value = '';
       endInput.value = '';
       startInput.removeAttribute('min');
@@ -88,6 +96,9 @@
     startInput.min = endInput.min = String(min);
     startInput.max = endInput.max = String(max);
     startInput.disabled = endInput.disabled = false;
+    const preset = card.querySelector('#statsRangePreset');
+    preset.disabled = false;
+    preset.value = savedPreset();
 
     if (!rangeState || rangeState.start < min || rangeState.start > max || rangeState.end < min || rangeState.end > max) {
       rangeState = savedRange(min, max);
@@ -101,6 +112,131 @@
     const text = `Intervalo selecionado: #${rangeState.start}–#${rangeState.end} · ${count} concursos carregados.`;
     if (countLabel.textContent !== label) countLabel.textContent = label;
     if (summary.textContent !== text) summary.textContent = text;
+  }
+
+  const PRESET_STORAGE_KEY = 'lotolab.stats-preset.v1';
+
+  function savedPreset() {
+    try { return localStorage.getItem(PRESET_STORAGE_KEY) === 'balanced' ? 'balanced' : 'random'; }
+    catch { return 'random'; }
+  }
+
+  function selectedIntervalDraws() {
+    if (!rangeState || !Array.isArray(data.draws)) return [];
+    return data.draws
+      .filter(draw => Number(draw.numero) >= rangeState.start && Number(draw.numero) <= rangeState.end)
+      .filter(draw => Array.isArray(draw.dezenas) && draw.dezenas.length === rules.drawCount
+        && new Set(draw.dezenas.map(Number)).size === rules.drawCount
+        && draw.dezenas.every(n => Number.isInteger(Number(n)) && Number(n) >= 1 && Number(n) <= rules.universe))
+      .sort((a, b) => Number(a.numero) - Number(b.numero));
+  }
+
+  function quantile(values, proportion) {
+    const sorted = [...values].sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    const position = (sorted.length - 1) * proportion;
+    const lower = Math.floor(position);
+    const upper = Math.ceil(position);
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+  }
+
+  function profileBounds(values, scale, minimum, maximum) {
+    const low = quantile(values, 0.05) * scale;
+    const high = quantile(values, 0.95) * scale;
+    return { min: Math.max(minimum, Math.floor(low)), max: Math.min(maximum, Math.ceil(high)) };
+  }
+
+  function isBorderNumber(number) {
+    return number <= 5 || number > 20 || (number - 1) % 5 === 0 || number % 5 === 0;
+  }
+
+  function balancedProfile(draws, pickCount) {
+    const scale = pickCount / rules.drawCount;
+    const sums = draws.map(draw => draw.dezenas.reduce((total, n) => total + Number(n), 0));
+    const evens = draws.map(draw => draw.dezenas.filter(n => Number(n) % 2 === 0).length);
+    const borders = draws.map(draw => draw.dezenas.filter(n => isBorderNumber(Number(n))).length);
+    const vertical = Array.from({ length: 5 }, (_, column) => draws.map(draw =>
+      draw.dezenas.filter(n => (Number(n) - 1) % 5 === column).length));
+    return {
+      sum: profileBounds(sums, scale, pickCount * (pickCount + 1) / 2, pickCount * (2 * rules.universe - pickCount + 1) / 2),
+      even: profileBounds(evens, scale, 0, pickCount),
+      border: profileBounds(borders, scale, 0, pickCount),
+      vertical: vertical.map(values => profileBounds(values, scale, 0, Math.min(5, pickCount)))
+    };
+  }
+
+  function matchesBalancedProfile(numbers, profile) {
+    const sum = numbers.reduce((total, n) => total + n, 0);
+    const evens = numbers.filter(n => n % 2 === 0).length;
+    const borders = numbers.filter(isBorderNumber).length;
+    const vertical = Array.from({ length: 5 }, (_, column) => numbers.filter(n => (n - 1) % 5 === column).length);
+    const within = (value, bound) => value >= bound.min && value <= bound.max;
+    return within(sum, profile.sum) && within(evens, profile.even) && within(borders, profile.border)
+      && vertical.every((count, column) => within(count, profile.vertical[column]));
+  }
+
+  function generateBalancedSet() {
+    const input = document.querySelector('#gameSetCount');
+    const quantity = Number(input?.value);
+    const size = Number(document.querySelector('#gameSetSize')?.value);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+      toast('Informe uma quantidade inteira de jogos entre 1 e 100.');
+      return;
+    }
+    if (!Number.isInteger(size) || size < rules.minPicks || size > rules.maxPicks) {
+      toast(`Escolha de ${rules.minPicks} a ${rules.maxPicks} dezenas por jogo.`);
+      return;
+    }
+    const draws = selectedIntervalDraws();
+    if (!draws.length) {
+      toast('Não há concursos válidos carregados neste intervalo para calcular o perfil.');
+      return;
+    }
+    const profile = balancedProfile(draws, size);
+    const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
+      .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
+    const generated = [];
+    const batchName = `Conjunto equilibrado · ${new Date().toLocaleString('pt-BR')}`;
+    const maxAttempts = Math.max(2000, Math.min(100000, quantity * 2000));
+    let attempts = 0;
+    while (generated.length < quantity && attempts < maxAttempts) {
+      attempts++;
+      const dezenas = randomGame(size);
+      const key = dezenas.join('-');
+      if (used.has(key) || !matchesBalancedProfile(dezenas, profile)) continue;
+      used.add(key);
+      generated.push({
+        id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
+        nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
+        observacao: `Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`,
+        dezenas,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    if (!generated.length) {
+      toast('Nenhum jogo atendeu ao perfil neste intervalo. Amplie o período ou use o modo aleatório sem filtros.');
+      return;
+    }
+    const previous = data.games;
+    data.games = [...data.games, ...generated];
+    try { saveLocal(); }
+    catch {
+      data.games = previous;
+      toast('Não foi possível salvar os jogos neste dispositivo. Libere espaço no navegador e tente novamente.');
+      return;
+    }
+    render();
+    toast(generated.length === quantity
+      ? `${generated.length} jogos equilibrados de ${size} dezenas foram salvos individualmente.`
+      : `${generated.length} de ${quantity} jogos equilibrados foram salvos; o limite de tentativas foi atingido sem completar o conjunto.`);
+  }
+
+  function interceptBalancedGeneration(event) {
+    const button = event.target.closest('[data-action="generate-game-set"]');
+    if (!button || document.querySelector('#statsRangePreset')?.value !== 'balanced') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    generateBalancedSet();
   }
 
   function setEndpoint(endpoint, rawValue) {
@@ -132,7 +268,11 @@
   document.addEventListener('change', event => {
     if (event.target.id === 'statsRangeStart') setEndpoint('start', event.target.value);
     if (event.target.id === 'statsRangeEnd') setEndpoint('end', event.target.value);
+    if (event.target.id === 'statsRangePreset') {
+      try { localStorage.setItem(PRESET_STORAGE_KEY, event.target.value === 'balanced' ? 'balanced' : 'random'); } catch {}
+    }
   });
+  document.addEventListener('click', interceptBalancedGeneration, true);
 
   const observer = new MutationObserver(refresh);
   const games = document.querySelector('#games');
