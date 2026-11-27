@@ -6,6 +6,7 @@
   let sumFilterState = null;
   let parityFilterState = null;
   let borderCenterFilterState = null;
+  let verticalFilterState = null;
 
   function availableDraws() {
     const select = document.querySelector('#games #drawSelect');
@@ -119,6 +120,17 @@
         </div>
       </div>
       <p id="statsBorderCenterFilterSummary" class="game-set-note" aria-live="polite">As dezenas no centro são complementares às dezenas na borda. Este filtro descreve o histórico e não aumenta a probabilidade de acerto.</p>
+      <div class="game-set-controls" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:10px">
+        <label class="filter-label" style="grid-column:1/-1">Filtro de faixas verticais
+          <select id="statsVerticalFilterMode" class="field" aria-label="Modo do filtro de faixas verticais">
+            <option value="off">Desativado</option>
+            <option value="typical">Faixa típica do período · percentis 5–95%</option>
+            <option value="manual">Faixas manuais por coluna</option>
+          </select>
+        </label>
+        <div id="statsVerticalManualFields" style="display:none;grid-column:1/-1;gap:8px"></div>
+      </div>
+      <p id="statsVerticalFilterSummary" class="game-set-note" aria-live="polite">Defina a quantidade permitida em cada coluna vertical. Este filtro descreve o histórico e não aumenta a probabilidade de acerto.</p>
       <p id="statsRangeSummary" class="game-set-note" aria-live="polite"></p>`;
     randomCard.insertAdjacentElement('beforebegin', card);
     return card;
@@ -150,6 +162,7 @@
       refreshSumFilter();
       refreshParityFilter();
       refreshBorderCenterFilter();
+      refreshVerticalFilter();
       return;
     }
 
@@ -178,6 +191,7 @@
     refreshSumFilter();
     refreshParityFilter();
     refreshBorderCenterFilter();
+    refreshVerticalFilter();
   }
 
   const PRESET_STORAGE_KEY = 'lotolab.stats-preset.v1';
@@ -534,6 +548,150 @@
     refreshBorderCenterFilter();
   }
 
+  const VERTICAL_FILTER_STORAGE_KEY = 'lotolab.stats-vertical-filter.v1';
+
+  function savedVerticalFilter() {
+    try {
+      const value = JSON.parse(localStorage.getItem(VERTICAL_FILTER_STORAGE_KEY) || 'null');
+      return {
+        mode: ['typical', 'manual'].includes(value?.mode) ? value.mode : 'off',
+        bounds: Array.from({ length: 5 }, (_, column) => ({
+          min: Number.isInteger(value?.bounds?.[column]?.min) ? value.bounds[column].min : null,
+          max: Number.isInteger(value?.bounds?.[column]?.max) ? value.bounds[column].max : null
+        }))
+      };
+    } catch { return { mode: 'off', bounds: Array.from({ length: 5 }, () => ({ min: null, max: null })) }; }
+  }
+
+  function verticalFilterSettings() {
+    if (!verticalFilterState) verticalFilterState = savedVerticalFilter();
+    return verticalFilterState;
+  }
+
+  function verticalBoundsForSize(size) {
+    return Array.from({ length: 5 }, (_, column) => {
+      const capacity = Array.from({ length: rules.universe }, (_, index) => index + 1)
+        .filter(number => (number - 1) % 5 === column).length;
+      return { min: Math.max(0, size - (rules.universe - capacity)), max: Math.min(size, capacity) };
+    });
+  }
+
+  function verticalColumnLabel(column) {
+    const numbers = Array.from({ length: rules.universe }, (_, index) => index + 1)
+      .filter(number => (number - 1) % 5 === column)
+      .map(number => String(number).padStart(2, '0'));
+    return `Coluna ${column + 1} · ${numbers.join(', ')}`;
+  }
+
+  function verticalManualBounds(size) {
+    const possible = verticalBoundsForSize(size);
+    return possible.map((bounds, column) => ({
+      min: Number(document.querySelector(`#statsVerticalMin${column + 1}`)?.value ?? verticalFilterSettings().bounds[column].min ?? bounds.min),
+      max: Number(document.querySelector(`#statsVerticalMax${column + 1}`)?.value ?? verticalFilterSettings().bounds[column].max ?? bounds.max)
+    }));
+  }
+
+  function verticalBoundsAreFeasible(bounds, size) {
+    return bounds.reduce((total, item) => total + item.min, 0) <= size
+      && bounds.reduce((total, item) => total + item.max, 0) >= size;
+  }
+
+  function refreshVerticalFilter() {
+    const modeInput = document.querySelector('#statsVerticalFilterMode');
+    const fields = document.querySelector('#statsVerticalManualFields');
+    const summary = document.querySelector('#statsVerticalFilterSummary');
+    if (!modeInput || !fields || !summary) return;
+    const settings = verticalFilterSettings();
+    const size = Number(document.querySelector('#gameSetSize')?.value) || rules.drawCount;
+    const possible = verticalBoundsForSize(size);
+    modeInput.value = settings.mode;
+    fields.style.display = settings.mode === 'manual' ? 'grid' : 'none';
+    fields.style.gridTemplateColumns = 'repeat(2,minmax(0,1fr))';
+    fields.innerHTML = possible.map((bounds, column) => {
+      const saved = settings.bounds[column] || {};
+      const min = Math.min(bounds.max, Math.max(bounds.min, saved.min ?? bounds.min));
+      const max = Math.max(min, Math.min(bounds.max, Math.max(bounds.min, saved.max ?? bounds.max)));
+      return `<div class="game-set-controls" style="grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));padding:8px 0;border-bottom:1px solid var(--line)">
+        <strong style="grid-column:1/-1;font-size:10px;color:var(--ink)">${verticalColumnLabel(column)}</strong>
+        <label class="filter-label">Mínimo
+          <input id="statsVerticalMin${column + 1}" class="field" type="number" step="1" inputmode="numeric" min="${bounds.min}" max="${bounds.max}" value="${min}" aria-label="Quantidade mínima na coluna ${column + 1}">
+        </label>
+        <label class="filter-label">Máximo
+          <input id="statsVerticalMax${column + 1}" class="field" type="number" step="1" inputmode="numeric" min="${bounds.min}" max="${bounds.max}" value="${max}" aria-label="Quantidade máxima na coluna ${column + 1}">
+        </label>
+      </div>`;
+    }).join('');
+    let bounds; let label;
+    if (settings.mode === 'manual') {
+      bounds = verticalManualBounds(size); label = 'Faixas manuais';
+    } else if (settings.mode === 'typical') {
+      const draws = selectedIntervalDraws();
+      if (!draws.length) { summary.textContent = 'Selecione um intervalo com concursos carregados para calcular as faixas típicas por coluna.'; return; }
+      const scale = size / rules.drawCount;
+      bounds = Array.from({ length: 5 }, (_, column) => {
+        const counts = draws.map(draw => draw.dezenas.filter(number => (Number(number) - 1) % 5 === column).length);
+        return profileBounds(counts, scale, possible[column].min, possible[column].max);
+      });
+      label = `Faixas típicas (percentis 5–95%, concursos #${draws[0].numero}–#${draws.at(-1).numero})`;
+    } else { summary.textContent = 'Filtro de faixas verticais desativado.'; return; }
+    const totalMin = bounds.reduce((total, item) => total + item.min, 0);
+    const totalMax = bounds.reduce((total, item) => total + item.max, 0);
+    const text = `${label}: ${bounds.map((item, column) => `C${column + 1} ${item.min}–${item.max}`).join(' · ')} dezenas. Total permitido: ${totalMin}–${totalMax}; o jogo tem ${size} dezenas.`;
+    summary.textContent = verticalBoundsAreFeasible(bounds, size) ? text : `${text} Atenção: essas faixas não permitem completar o jogo; ajuste os limites.`;
+  }
+
+  function resolveVerticalFilter(draws, size) {
+    const mode = verticalFilterSettings().mode;
+    if (mode === 'off') return { valid: true, mode, bounds: null };
+    const possible = verticalBoundsForSize(size);
+    let bounds;
+    if (mode === 'manual') {
+      bounds = verticalManualBounds(size);
+      if (!bounds.every((item, column) => Number.isInteger(item.min) && Number.isInteger(item.max)
+        && item.min >= possible[column].min && item.max <= possible[column].max && item.min <= item.max)) {
+        return { valid: false, error: 'Informe, em cada coluna, quantidades inteiras entre os limites possíveis e com mínimo menor ou igual ao máximo.' };
+      }
+      if (!verticalBoundsAreFeasible(bounds, size)) return { valid: false, error: `As faixas das cinco colunas precisam permitir um total de ${size} dezenas. Ajuste os mínimos e máximos.` };
+      return { valid: true, mode, bounds };
+    }
+    if (!draws.length) return { valid: false, error: 'Não há concursos válidos carregados no intervalo para calcular as faixas verticais.' };
+    const scale = size / rules.drawCount;
+    bounds = Array.from({ length: 5 }, (_, column) => {
+      const counts = draws.map(draw => draw.dezenas.filter(number => (Number(number) - 1) % 5 === column).length);
+      return profileBounds(counts, scale, possible[column].min, possible[column].max);
+    });
+    if (!verticalBoundsAreFeasible(bounds, size)) return { valid: false, error: 'A faixa típica por coluna não permite completar um jogo neste intervalo. Amplie ou altere o período e tente novamente.' };
+    return { valid: true, mode, bounds };
+  }
+
+  function verticalFilterMatches(numbers, filter) {
+    if (!filter?.bounds) return true;
+    const counts = Array.from({ length: 5 }, (_, column) => numbers.filter(number => (number - 1) % 5 === column).length);
+    return counts.every((count, column) => count >= filter.bounds[column].min && count <= filter.bounds[column].max);
+  }
+
+  function appendVerticalFilterAnnotation(observation, filter) {
+    if (!filter || filter.mode === 'off' || !filter.bounds) return observation;
+    const label = filter.mode === 'manual' ? 'manual' : 'típica do período (percentis 5–95%)';
+    const details = filter.bounds.map((item, column) => `coluna ${column + 1} ${item.min}–${item.max}`).join('; ');
+    return `${observation} Filtro de faixas verticais ${label}: ${details}.`;
+  }
+
+  function saveVerticalFilterFromInputs() {
+    const mode = document.querySelector('#statsVerticalFilterMode')?.value;
+    const bounds = Array.from({ length: 5 }, (_, column) => {
+      const minText = document.querySelector(`#statsVerticalMin${column + 1}`)?.value;
+      const maxText = document.querySelector(`#statsVerticalMax${column + 1}`)?.value;
+      return {
+        min: minText !== '' && Number.isInteger(Number(minText)) ? Number(minText) : null,
+        max: maxText !== '' && Number.isInteger(Number(maxText)) ? Number(maxText) : null
+      };
+    });
+    verticalFilterState = { mode: ['typical', 'manual'].includes(mode) ? mode : 'off', bounds };
+    try { localStorage.setItem(VERTICAL_FILTER_STORAGE_KEY, JSON.stringify(verticalFilterState)); } catch {}
+    refreshVerticalFilter();
+  }
+
   function savedPreset() {
     try {
       const preset = localStorage.getItem(PRESET_STORAGE_KEY);
@@ -633,6 +791,8 @@
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const borderCenterFilter = resolveBorderCenterFilter(draws, size);
     if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
+    const verticalFilter = resolveVerticalFilter(draws, size);
+    if (!verticalFilter.valid) { toast(verticalFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -644,12 +804,12 @@
       const dezenas = randomGame(size);
       const key = dezenas.join('-');
       const total = dezenas.reduce((sum, number) => sum + number, 0);
-      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
+      if (used.has(key) || !matchesBalancedProfile(dezenas, profile) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter) || !verticalFilterMatches(dezenas, verticalFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter), parityFilter, size), borderCenterFilter, size),
+        observacao: appendVerticalFilterAnnotation(appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Equilibrado · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95% para soma, pares, borda/centro e faixas verticais.`, sumFilter), parityFilter, size), borderCenterFilter, size), verticalFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -699,6 +859,8 @@
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const borderCenterFilter = resolveBorderCenterFilter(draws, size);
     if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
+    const verticalFilter = resolveVerticalFilter(draws, size);
+    if (!verticalFilter.valid) { toast(verticalFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -710,12 +872,12 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
+      if (used.has(key) || total < sumBounds.min || total > sumBounds.max || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter) || !verticalFilterMatches(dezenas, verticalFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter), parityFilter, size), borderCenterFilter, size),
+        observacao: appendVerticalFilterAnnotation(appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Soma típica · soma ${sumBounds.min}–${sumBounds.max} · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros) · percentis 5–95%.`, sumFilter), parityFilter, size), borderCenterFilter, size), verticalFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -795,6 +957,8 @@
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const borderCenterFilter = resolveBorderCenterFilter(draws, size);
     if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
+    const verticalFilter = resolveVerticalFilter(draws, size);
+    if (!verticalFilter.valid) { toast(verticalFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -806,13 +970,13 @@
       const dezenas = weightedGame(size, delayByNumber);
       const key = dezenas.join('-');
       const total = dezenas.reduce((sum, number) => sum + number, 0);
-      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
+      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter) || !verticalFilterMatches(dezenas, verticalFilter)) continue;
       used.add(key);
       const averageDelay = dezenas.reduce((total, number) => total + delayByNumber[number], 0) / size;
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter), parityFilter, size), borderCenterFilter, size),
+        observacao: appendVerticalFilterAnnotation(appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Atrasadas · atraso médio das dezenas: ${averageDelay.toFixed(1)} concursos · peso 1 + atraso · concursos #${draws[0].numero}–#${draws.at(-1).numero} (${draws.length} registros). Atrasos não preveem resultados nem aumentam a probabilidade de acerto.`, sumFilter), parityFilter, size), borderCenterFilter, size), verticalFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -853,6 +1017,8 @@
     if (!parityFilter.valid) { toast(parityFilter.error); return; }
     const borderCenterFilter = resolveBorderCenterFilter(draws, size);
     if (!borderCenterFilter.valid) { toast(borderCenterFilter.error); return; }
+    const verticalFilter = resolveVerticalFilter(draws, size);
+    if (!verticalFilter.valid) { toast(verticalFilter.error); return; }
     const used = new Set(data.games.filter(game => Array.isArray(game.dezenas) && game.dezenas.length === size)
       .map(game => game.dezenas.map(Number).sort((a, b) => a - b).join('-')));
     const generated = [];
@@ -864,12 +1030,12 @@
       const dezenas = randomGame(size);
       const total = dezenas.reduce((sum, number) => sum + number, 0);
       const key = dezenas.join('-');
-      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter)) continue;
+      if (used.has(key) || !sumFilterMatches(total, sumFilter) || !parityFilterMatches(dezenas, parityFilter) || !borderCenterFilterMatches(dezenas, borderCenterFilter) || !verticalFilterMatches(dezenas, verticalFilter)) continue;
       used.add(key);
       generated.push({
         id: crypto.randomUUID?.() || `${Date.now()}-${generated.length}-${Math.random()}`,
         nome: `${batchName} · ${size} dezenas · jogo ${String(generated.length + 1).padStart(2, '0')}`,
-        observacao: appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter), parityFilter, size), borderCenterFilter, size),
+        observacao: appendVerticalFilterAnnotation(appendBorderCenterFilterAnnotation(appendParityFilterAnnotation(appendSumFilterAnnotation(`Preset Aleatório · concursos #${draws[0]?.numero ?? '—'}–#${draws.at(-1)?.numero ?? '—'}${draws.length ? ` (${draws.length} registros)` : ''}.`, sumFilter), parityFilter, size), borderCenterFilter, size), verticalFilter),
         dezenas,
         updatedAt: new Date().toISOString()
       });
@@ -898,8 +1064,9 @@
     const filterMode = sumFilterSettings().mode;
     const parityMode = parityFilterSettings().mode;
     const borderCenterMode = borderCenterFilterSettings().mode;
+    const verticalMode = verticalFilterSettings().mode;
     if (!button) return;
-    if (preset === 'random' && filterMode === 'off' && parityMode === 'off' && borderCenterMode === 'off') return;
+    if (preset === 'random' && filterMode === 'off' && parityMode === 'off' && borderCenterMode === 'off' && verticalMode === 'off') return;
     if (!['random', 'balanced', 'typical-sum', 'overdue'].includes(preset)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -946,7 +1113,8 @@
     if (['statsSumFilterMode', 'statsSumMin', 'statsSumMax'].includes(event.target.id)) saveSumFilterFromInputs();
     if (['statsParityFilterMode', 'statsParityMin', 'statsParityMax'].includes(event.target.id)) saveParityFilterFromInputs();
     if (['statsBorderCenterFilterMode', 'statsBorderCenterMin', 'statsBorderCenterMax'].includes(event.target.id)) saveBorderCenterFilterFromInputs();
-    if (event.target.id === 'gameSetSize') { refreshSumFilter(); refreshParityFilter(); refreshBorderCenterFilter(); }
+    if (event.target.id === 'statsVerticalFilterMode' || /^statsVertical(?:Min|Max)[1-5]$/.test(event.target.id)) saveVerticalFilterFromInputs();
+    if (event.target.id === 'gameSetSize') { refreshSumFilter(); refreshParityFilter(); refreshBorderCenterFilter(); refreshVerticalFilter(); }
   });
   document.addEventListener('click', interceptStatisticalGeneration, true);
 
