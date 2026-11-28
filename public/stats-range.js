@@ -630,18 +630,29 @@
       bounds = verticalManualBounds(size); label = 'Faixas manuais';
     } else if (settings.mode === 'typical') {
       const draws = selectedIntervalDraws();
-      if (!draws.length) { summary.textContent = 'Selecione um intervalo com concursos carregados para calcular as faixas típicas por coluna.'; return; }
+      if (!draws.length) {
+        const text = 'Selecione um intervalo com concursos carregados para calcular as faixas típicas por coluna.';
+        if (summary.textContent !== text) summary.textContent = text;
+        return;
+      }
       const scale = size / rules.drawCount;
       bounds = Array.from({ length: 5 }, (_, column) => {
         const counts = draws.map(draw => draw.dezenas.filter(number => (Number(number) - 1) % 5 === column).length);
         return profileBounds(counts, scale, possible[column].min, possible[column].max);
       });
       label = `Faixas típicas (percentis 5–95%, concursos #${draws[0].numero}–#${draws.at(-1).numero})`;
-    } else { summary.textContent = 'Filtro de faixas verticais desativado.'; return; }
+    } else {
+      const text = 'Filtro de faixas verticais desativado.';
+      if (summary.textContent !== text) summary.textContent = text;
+      return;
+    }
     const totalMin = bounds.reduce((total, item) => total + item.min, 0);
     const totalMax = bounds.reduce((total, item) => total + item.max, 0);
     const text = `${label}: ${bounds.map((item, column) => `C${column + 1} ${item.min}–${item.max}`).join(' · ')} dezenas. Total permitido: ${totalMin}–${totalMax}; o jogo tem ${size} dezenas.`;
-    summary.textContent = verticalBoundsAreFeasible(bounds, size) ? text : `${text} Atenção: essas faixas não permitem completar o jogo; ajuste os limites.`;
+    const finalText = verticalBoundsAreFeasible(bounds, size)
+      ? text
+      : `${text} Atenção: essas faixas não permitem completar o jogo; ajuste os limites.`;
+    if (summary.textContent !== finalText) summary.textContent = finalText;
   }
 
   function resolveVerticalFilter(draws, size) {
