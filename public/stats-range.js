@@ -607,20 +607,24 @@
     modeInput.value = settings.mode;
     fields.style.display = settings.mode === 'manual' ? 'grid' : 'none';
     fields.style.gridTemplateColumns = 'repeat(2,minmax(0,1fr))';
-    fields.innerHTML = possible.map((bounds, column) => {
-      const saved = settings.bounds[column] || {};
-      const min = Math.min(bounds.max, Math.max(bounds.min, saved.min ?? bounds.min));
-      const max = Math.max(min, Math.min(bounds.max, Math.max(bounds.min, saved.max ?? bounds.max)));
-      return `<div class="game-set-controls" style="grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));padding:8px 0;border-bottom:1px solid var(--line)">
-        <strong style="grid-column:1/-1;font-size:10px;color:var(--ink)">${verticalColumnLabel(column)}</strong>
-        <label class="filter-label">Mínimo
-          <input id="statsVerticalMin${column + 1}" class="field" type="number" step="1" inputmode="numeric" min="${bounds.min}" max="${bounds.max}" value="${min}" aria-label="Quantidade mínima na coluna ${column + 1}">
-        </label>
-        <label class="filter-label">Máximo
-          <input id="statsVerticalMax${column + 1}" class="field" type="number" step="1" inputmode="numeric" min="${bounds.min}" max="${bounds.max}" value="${max}" aria-label="Quantidade máxima na coluna ${column + 1}">
-        </label>
-      </div>`;
-    }).join('');
+    const manualFieldsKey = JSON.stringify({ size, bounds: settings.bounds });
+    if (settings.mode === 'manual' && fields.dataset.renderKey !== manualFieldsKey) {
+      fields.innerHTML = possible.map((bounds, column) => {
+        const saved = settings.bounds[column] || {};
+        const min = Math.min(bounds.max, Math.max(bounds.min, saved.min ?? bounds.min));
+        const max = Math.max(min, Math.min(bounds.max, Math.max(bounds.min, saved.max ?? bounds.max)));
+        return `<div class="game-set-controls" style="grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));padding:8px 0;border-bottom:1px solid var(--line)">
+          <strong style="grid-column:1/-1;font-size:10px;color:var(--ink)">${verticalColumnLabel(column)}</strong>
+          <label class="filter-label">Mínimo
+            <input id="statsVerticalMin${column + 1}" class="field" type="number" step="1" inputmode="numeric" min="${bounds.min}" max="${bounds.max}" value="${min}" aria-label="Quantidade mínima na coluna ${column + 1}">
+          </label>
+          <label class="filter-label">Máximo
+            <input id="statsVerticalMax${column + 1}" class="field" type="number" step="1" inputmode="numeric" min="${bounds.min}" max="${bounds.max}" value="${max}" aria-label="Quantidade máxima na coluna ${column + 1}">
+          </label>
+        </div>`;
+      }).join('');
+      fields.dataset.renderKey = manualFieldsKey;
+    }
     let bounds; let label;
     if (settings.mode === 'manual') {
       bounds = verticalManualBounds(size); label = 'Faixas manuais';
